@@ -94,12 +94,17 @@ impl WaylandBuffer {
         // Create wayland shm pool and buffer
         let pool = shm.create_pool(tempfile.as_fd(), pool_size, qh, ());
         let released = Arc::new(AtomicBool::new(true));
+        // LiveSplit's Wayland presenter supplies premultiplied ARGB pixels and
+        // explicitly sets alpha to 255 for opaque windows. XRGB would discard
+        // transparency even when winit correctly clears the opaque region.
+        // This fork therefore requires initialized alpha from its caller,
+        // unlike stock softbuffer's contract where the high byte is unused.
         let buffer = pool.create_buffer(
             0,
             width,
             height,
             width * 4,
-            wl_shm::Format::Xrgb8888,
+            wl_shm::Format::Argb8888,
             qh,
             released.clone(),
         );
@@ -133,13 +138,14 @@ impl WaylandBuffer {
                 self.map = unsafe { map_file(&self.tempfile) };
             }
 
-            // Create buffer with correct size
+            // Keep the ARGB format on resize too, otherwise transparency would
+            // disappear as soon as the compositor changes the surface size.
             self.buffer = self.pool.create_buffer(
                 0,
                 width,
                 height,
                 width * 4,
-                wl_shm::Format::Xrgb8888,
+                wl_shm::Format::Argb8888,
                 &self.qh,
                 self.released.clone(),
             );
