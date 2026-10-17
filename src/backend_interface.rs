@@ -24,6 +24,11 @@ pub(crate) trait SurfaceInterface<D: HasDisplayHandle + ?Sized, W: HasWindowHand
         Self: Sized;
     /// Get the inner window handle.
     fn window(&self) -> &W;
+    /// Whether this fork's native surface interprets the high byte as alpha.
+    /// Backends that retain upstream's XRGB contract keep the default.
+    fn uses_alpha(&self) -> bool {
+        false
+    }
     /// Resize the internal buffer to the given width and height.
     fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<(), SoftBufferError>;
     /// Get a mutable reference to the buffer.

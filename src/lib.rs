@@ -105,6 +105,17 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> Surface<D, W> {
         self.surface_impl.window()
     }
 
+    /// Whether the native buffer interprets its high byte as premultiplied alpha.
+    ///
+    /// This is an extension of LiveSplit's integration fork: Wayland ARGB8888 and
+    /// X11 depth-32 RGB visuals use alpha; other surfaces retain upstream's zero
+    /// high-byte contract. Query the created surface rather than assuming that
+    /// a request for transparency succeeded. For alpha surfaces, supply
+    /// premultiplied `0xAARRGGBB` pixels, including alpha 255 for opaque content.
+    pub fn uses_alpha(&self) -> bool {
+        self.surface_impl.uses_alpha()
+    }
+
     /// Set the size of the buffer that will be returned by [`Surface::buffer_mut`].
     ///
     /// If the size of the buffer does not match the size of the window, the buffer is drawn
@@ -175,6 +186,11 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> HasWindowHandle for Surface<D, W> 
 /// order 8 bits are to be set to 0. The next highest order 8 bits are the red channel, then the
 /// green channel, and then the blue channel in the lowest-order 8 bits. See the examples for
 /// one way to build this format using bitwise operations.
+///
+/// In LiveSplit's integration fork, when [`Surface::uses_alpha`] returns true,
+/// the high byte instead contains alpha and RGB must be premultiplied by it.
+/// This applies to the existing Wayland ARGB8888 buffers and X11 depth-32
+/// surfaces; depth-24 X11 surfaces retain the original representation below.
 ///
 /// --------
 ///

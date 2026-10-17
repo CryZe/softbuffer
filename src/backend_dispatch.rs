@@ -99,6 +99,15 @@ macro_rules! make_dispatch {
                 }
             }
 
+            fn uses_alpha(&self) -> bool {
+                match self {
+                    $(
+                        $(#[$attr])*
+                        Self::$name(inner) => inner.uses_alpha(),
+                    )*
+                }
+            }
+
             fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<(), SoftBufferError> {
                 match self {
                     $(

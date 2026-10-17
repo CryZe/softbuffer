@@ -187,6 +187,13 @@ impl<D: HasDisplayHandle + ?Sized, W: HasWindowHandle> SurfaceInterface<D, W>
         &self.window_handle
     }
 
+    fn uses_alpha(&self) -> bool {
+        // This fork already allocates ARGB8888 buffers on Wayland. Reporting
+        // that format lets callers preserve the existing pixel policy without
+        // guessing from a platform name. No allocation or presentation changes.
+        true
+    }
+
     fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<(), SoftBufferError> {
         self.size = Some(
             (|| {

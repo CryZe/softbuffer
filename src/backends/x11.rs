@@ -310,6 +310,16 @@ impl<D: HasDisplayHandle + ?Sized, W: HasWindowHandle> SurfaceInterface<D, W> fo
         &self.window_handle
     }
 
+    fn uses_alpha(&self) -> bool {
+        // supported_visuals already restricts both depths to 8-bit RGB masks.
+        // On a depth-32 visual the remaining high byte is compositor alpha;
+        // on a depth-24 visual it is padding. Use the depth returned by X11,
+        // not the requested transparency: winit may fall back to depth 24.
+        // This only exposes the existing native format; presentation already
+        // submits all 32 bits unchanged through PutImage / ShmPutImage.
+        self.depth == 32
+    }
+
     fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<(), SoftBufferError> {
         tracing::trace!(
             "resize: window={:X}, size={}x{}",
