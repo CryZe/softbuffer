@@ -1,4 +1,8 @@
-//! Softbuffer implementation using CoreGraphics.
+//! CoreGraphics image/layer presentation for AppKit and UIKit surfaces.
+//!
+//! AppKit samples native window opacity at construction; a nonopaque window uses
+//! premultiplied ARGB pixels. Opaque AppKit and UIKit retain the RGBX contract.
+//! Callers recreate the surface if they change the native window's opacity mode.
 use crate::backend_interface::*;
 use crate::error::InitError;
 use crate::{util, Rect, SoftBufferError};
@@ -104,6 +108,8 @@ pub struct CGImpl<D, W> {
     root_layer: SendCALayer,
     observer: Retained<Observer>,
     color_space: CFRetained<CGColorSpace>,
+    /// Fixed pixel contract, selected before the caller fills the first buffer.
+    uses_alpha: bool,
     /// The width of the underlying buffer.
     width: usize,
     /// The height of the underlying buffer.
@@ -138,7 +144,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
             None,
         ))?;
 
-        let root_layer = match window_src.window_handle()?.as_raw() {
+        let (root_layer, uses_alpha) = match window_src.window_handle()?.as_raw() {
             RawWindowHandle::AppKit(handle) => {
                 // SAFETY: The pointer came from `WindowHandle`, which ensures that the
                 // `AppKitWindowHandle` contains a valid pointer to an `NSView`.
@@ -151,7 +157,23 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
 
                 // SAFETY: `-[NSView layer]` returns an optional `CALayer`
                 let layer: Option<Retained<CALayer>> = unsafe { msg_send![view, layer] };
-                layer.expect("failed making the view layer-backed")
+                let layer = layer.expect("failed making the view layer-backed");
+
+                // Preserve upstream's zero-high-byte contract for opaque windows.
+                // A transparent AppKit window instead needs premultiplied alpha
+                // all the way through CGImage; NoneSkipFirst discards it even
+                // when the NSWindow and its layers allow transparency.
+                // https://github.com/rust-windowing/softbuffer/issues/17
+                // SAFETY: `view` is a live NSView on the main thread. Its optional
+                // window is retained only while querying NSWindow's opacity.
+                let window: Option<Retained<NSObject>> = unsafe { msg_send![view, window] };
+                let uses_alpha = window.is_some_and(|window| {
+                    // SAFETY: NSView.window returned a live, retained NSWindow;
+                    // the main-thread construction check still holds here.
+                    let opaque: Bool = unsafe { msg_send![&*window, isOpaque] };
+                    !opaque.as_bool()
+                });
+                (layer, uses_alpha)
             }
             RawWindowHandle::UiKit(handle) => {
                 // SAFETY: The pointer came from `WindowHandle`, which ensures that the
@@ -162,7 +184,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
 
                 // SAFETY: `-[UIView layer]` returns `CALayer`
                 let layer: Retained<CALayer> = unsafe { msg_send![view, layer] };
-                layer
+                (layer, false)
             }
             _ => return Err(InitError::Unsupported(window_src)),
         };
@@ -240,6 +262,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
             root_layer: SendCALayer(root_layer),
             observer,
             color_space,
+            uses_alpha,
             width,
             height,
             _display: PhantomData,
@@ -250,6 +273,10 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
     #[inline]
     fn window(&self) -> &W {
         &self.window_handle
+    }
+
+    fn uses_alpha(&self) -> bool {
+        self.uses_alpha
     }
 
     fn resize(&mut self, width: NonZeroU32, height: NonZeroU32) -> Result<(), SoftBufferError> {
@@ -320,16 +347,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
             }
         };
 
-        // `CGBitmapInfo` consists of a combination of `CGImageAlphaInfo`, `CGImageComponentInfo`
-        // `CGImageByteOrderInfo` and `CGImagePixelFormatInfo` (see e.g. `CGBitmapInfoMake`).
-        //
-        // TODO: Use `CGBitmapInfo::new` once the next version of objc2-core-graphics is released.
-        let bitmap_info = CGBitmapInfo(
-            CGImageAlphaInfo::NoneSkipFirst.0
-                | CGImageComponentInfo::Integer.0
-                | CGImageByteOrderInfo::Order32Little.0
-                | CGImagePixelFormatInfo::Packed.0,
-        );
+        let bitmap_info = bitmap_info(self.imp.uses_alpha);
 
         let image = unsafe {
             CGImage::new(
@@ -363,6 +381,46 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
 
     fn present_with_damage(self, _damage: &[Rect]) -> Result<(), SoftBufferError> {
         self.present()
+    }
+}
+
+/// Keep the native image interpretation identical to `Surface::uses_alpha`.
+/// Little-endian 0xAARRGGBB words are BGRA bytes with premultiplied RGB; opaque
+/// surfaces continue to ignore their reserved high byte instead of reading zero
+/// alpha from existing RGBX callers. No conversion or extra copy is necessary.
+fn bitmap_info(uses_alpha: bool) -> CGBitmapInfo {
+    let alpha = if uses_alpha {
+        CGImageAlphaInfo::PremultipliedFirst
+    } else {
+        CGImageAlphaInfo::NoneSkipFirst
+    };
+
+    CGBitmapInfo(
+        alpha.0
+            | CGImageComponentInfo::Integer.0
+            | CGImageByteOrderInfo::Order32Little.0
+            | CGImagePixelFormatInfo::Packed.0,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bitmap_info;
+    use objc2_core_graphics::{CGBitmapInfo, CGImageAlphaInfo, CGImageByteOrderInfo};
+
+    #[test]
+    fn native_images_read_alpha_only_for_the_selected_surface_contract() {
+        for (uses_alpha, expected) in [
+            (false, CGImageAlphaInfo::NoneSkipFirst),
+            (true, CGImageAlphaInfo::PremultipliedFirst),
+        ] {
+            let info = bitmap_info(uses_alpha);
+            assert_eq!(info.0 & CGBitmapInfo::AlphaInfoMask.0, expected.0);
+            assert_eq!(
+                info.0 & CGBitmapInfo::ByteOrderInfoMask.0,
+                CGImageByteOrderInfo::Order32Little.0
+            );
+        }
     }
 }
 
